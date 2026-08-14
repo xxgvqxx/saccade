@@ -61,8 +61,8 @@ final class WinkCalibrationController {
     private var view: WinkCalibrationView?
     private var state: State = .idle
     private var phase: Phase = .open
-    /// (visionLeft, visionRight) openness per captured frame, per phase.
-    private var captured: [Phase: [(l: Double, r: Double)]] = [:]
+    /// (visionLeft, visionRight) openness + head yaw per frame, per phase.
+    private var captured: [Phase: [(l: Double, r: Double, yaw: Double)]] = [:]
     private var retryNote: String?
 
     /// (result, failureMessage) — both nil on user cancel; failureMessage set
@@ -100,15 +100,15 @@ final class WinkCalibrationController {
         enterInterstitial()
     }
 
-    /// Feed one frame's openness (Vision labeling). Main thread.
-    func ingest(visionLeft: Double, visionRight: Double) {
+    /// Feed one frame's openness (Vision labeling) and head yaw. Main thread.
+    func ingest(visionLeft: Double, visionRight: Double, yaw: Double) {
         guard isActive else { return }
         view?.faceVisible = true
         guard state == .collecting else { return }
         var frames = captured[phase] ?? []
         // Hard cap — ingest can race the phase transition by a frame or two.
         guard frames.count < phase.frameTarget else { return }
-        frames.append((l: visionLeft, r: visionRight))
+        frames.append((l: visionLeft, r: visionRight, yaw: yaw))
         captured[phase] = frames
         view?.progress = Double(frames.count) / Double(phase.frameTarget)
         view?.needsDisplay = true
@@ -193,7 +193,7 @@ final class WinkCalibrationController {
     /// Frames within a wink phase where exactly one eye is well down and the
     /// other clearly up, in normalized openness.
     private static func winkFrames(
-        frames: [(l: Double, r: Double)],
+        frames: [(l: Double, r: Double, yaw: Double)],
         openStats: (l: Double, r: Double), closedStats: (l: Double, r: Double)
     ) -> (leftRegionClosed: [(l: Double, r: Double)], rightRegionClosed: [(l: Double, r: Double)]) {
         var leftClosed: [(l: Double, r: Double)] = []
@@ -209,7 +209,7 @@ final class WinkCalibrationController {
 
     /// nil = phase is usable; otherwise the message to show before retrying.
     private static func winkPhaseProblem(
-        frames: [(l: Double, r: Double)],
+        frames: [(l: Double, r: Double, yaw: Double)],
         openStats: (l: Double, r: Double), closedStats: (l: Double, r: Double)
     ) -> String? {
         let (leftClosed, rightClosed) = winkFrames(
@@ -259,13 +259,31 @@ final class WinkCalibrationController {
             return (nil, "Your open eye droops almost shut when you wink, which reads as a blink. Try softer winks — or raise the eyebrow over the open eye — and recalibrate.")
         }
 
+        // Head pose to gate detection around: winks only count near the pose
+        // they were calibrated in — far-eye landmarks lie under big yaw.
+        let allYaw = Phase.allCases.flatMap { (captured[$0] ?? []).map { $0.yaw } }
+        let referenceYaw = Self.median(allYaw)
+
+        // This user's wink asymmetry: how far apart the eyes' normalized
+        // openness actually sits mid-wink. Detection requires 60% of the
+        // 25th-percentile gap, floored — blinks (both eyes down together)
+        // never open a gap like this even when pose skews the levels.
+        var asymValues: [Double] = []
+        asymValues += (userLeftIsVisionLeft ? leftPhaseLeftClosed : leftPhaseRightClosed)
+            .map { abs($0.r - $0.l) }
+        asymValues += (userRightIsVisionLeft ? rightPhaseLeftClosed : rightPhaseRightClosed)
+            .map { abs($0.r - $0.l) }
+        let asymEntry = min(0.55, max(0.30, Self.percentile(asymValues, 0.25) * 0.6))
+
         let data = WinkCalibrationData(
             visionLeftOpen: open.l,
             visionLeftClosed: closed.l,
             visionRightOpen: open.r,
             visionRightClosed: closed.r,
             userLeftIsVisionLeft: userLeftIsVisionLeft,
-            companionGuard: companionGuard
+            companionGuard: companionGuard,
+            referenceYaw: referenceYaw,
+            asymEntry: asymEntry
         )
         return (data, nil)
     }

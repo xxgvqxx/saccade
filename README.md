@@ -145,13 +145,20 @@ Spotlight ("Saccade") or `open /Applications/Saccade.app`.
   a toggle to turn the key off) or pause/resume tracking. Off until you run
   the guided **Calibrate Winks** flow, which learns your open/closed eye
   shape, watches real blinks, then watches three winks per eye — from that it
-  knows which landmark region is *your* left eye (immune to camera mirroring)
-  and how much your other eye droops when you wink. Detection then requires
-  one eye held closed ~0.2 s while the other stays clearly open the whole
-  time, so blinks — both eyes dropping together, and over faster than the
-  hold — can't fire it. If your winks are too blink-like, calibration says so
-  instead of saving garbage. Selection uses your gaze from just before the
-  eyelid started moving, because a closing lid corrupts the landmarks.
+  knows which landmark region is *your* left eye (immune to camera
+  mirroring), how much your other eye droops when you wink, how wide the
+  openness gap between your eyes gets mid-wink, and your head pose. Detection
+  then requires one eye held closed ~0.2 s while the other stays clearly open
+  AND the gap between the eyes exceeds your calibrated wink asymmetry — both
+  eyes droop during a real wink, so the *difference* between them is the
+  robust signal. Blinks fail every gate: both eyes drop together and the
+  whole blink is over faster than the hold. Open-eye baselines adapt slowly
+  to pose and lighting, and detection pauses beyond ~20° of head yaw from
+  the calibration pose (a half-occluded far eye produces unreliable
+  landmarks — the classic source of head-turned-blink false winks). If your
+  winks are too blink-like, calibration says so instead of saving garbage.
+  Selection uses your gaze from just before the eyelid started moving,
+  because a closing lid corrupts the landmarks.
 - **Smoothing** (menu): presets from Responsive to Very Steady. Under the
   hood: median-of-5 pre-filter → One Euro filter (normalized coordinates) →
   a fixation stabilizer that pins the dot while predictions stay within a

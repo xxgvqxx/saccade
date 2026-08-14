@@ -261,7 +261,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if winkCalibrator.isActive {
             winkCalibrator.ingest(
                 visionLeft: result.visionLeftOpenness,
-                visionRight: result.visionRightOpenness
+                visionRight: result.visionRightOpenness,
+                yaw: result.headYaw
             )
             return
         }
@@ -277,6 +278,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         winkDetector.ingest(
             visionLeft: result.visionLeftOpenness,
             visionRight: result.visionRightOpenness,
+            yaw: result.headYaw,
             time: lastFaceTime
         )
         // While an eye is closed (or mid-wink), the pupil landmarks are

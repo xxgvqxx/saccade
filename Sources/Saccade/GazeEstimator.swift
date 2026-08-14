@@ -37,6 +37,9 @@ final class GazeEstimator {
         let gazeFeatures: [Double]?
         let visionLeftOpenness: Double
         let visionRightOpenness: Double
+        /// Head yaw in radians (0 when Vision doesn't report one). The wink
+        /// detector gates on this — far-eye landmarks lie under big yaw.
+        let headYaw: Double
     }
 
     func analyze(_ pixelBuffer: CVPixelBuffer) -> FrameResult? {
@@ -70,7 +73,8 @@ final class GazeEstimator {
             return FrameResult(
                 gazeFeatures: nil,
                 visionLeftOpenness: leftOpenness,
-                visionRightOpenness: rightOpenness
+                visionRightOpenness: rightOpenness,
+                headYaw: face.yaw?.doubleValue ?? 0
             )
         }
 
@@ -94,7 +98,8 @@ final class GazeEstimator {
             return FrameResult(
                 gazeFeatures: nil,
                 visionLeftOpenness: leftOpenness,
-                visionRightOpenness: rightOpenness
+                visionRightOpenness: rightOpenness,
+                headYaw: yaw
             )
         }
 
@@ -116,7 +121,8 @@ final class GazeEstimator {
                 noseDX, noseDY, interEye, eyeMidY,
             ],
             visionLeftOpenness: leftOpenness,
-            visionRightOpenness: rightOpenness
+            visionRightOpenness: rightOpenness,
+            headYaw: yaw
         )
     }
 
