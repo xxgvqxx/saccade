@@ -132,10 +132,15 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         from connection: AVCaptureConnection
     ) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        if let raw = estimator.features(from: pixelBuffer) {
-            onFeatures?(raw)
-        } else {
-            onNoFace?()
+        // The capture queue never goes idle while the camera runs, so GCD may
+        // never drain its autorelease pool — Vision's per-frame objects would
+        // accumulate for hours (multi-GB). Drain explicitly every frame.
+        autoreleasepool {
+            if let raw = estimator.features(from: pixelBuffer) {
+                onFeatures?(raw)
+            } else {
+                onNoFace?()
+            }
         }
     }
 }
