@@ -7,16 +7,54 @@ between fixation points.
 Everything runs locally. Camera frames are processed in memory with Apple's
 Vision framework and never stored or transmitted.
 
+## Features
+
+- **Gaze-to-focus jump** — look at any window on any app, tap Right Option:
+  the window is raised, the cursor warps to your gaze point, and configured
+  apps (Ghostty by default) get one synthesized click so the right *split*
+  gets keyboard focus.
+- **Wink control** — wink either eye to select the gazed window or to
+  pause/resume tracking, with per-eye action assignment. A guided calibration
+  learns *your* winks; blinks are structurally rejected. A wink can fully
+  replace the Right Option key.
+- **Multi-screen** — per-display calibration models; the screen you're
+  looking at is detected automatically, with hysteresis against flapping.
+  Portrait displays get transposed calibration grids.
+- **Two-phase calibration** — eyes-only dots, then head-pointing dots, so a
+  turned head with counter-rotated eyes doesn't read as a gaze shift.
+- **Posture passes** — quick 12-dot top-up captures from a new sitting or
+  standing position; one model then spans every posture you've taught it.
+- **Cursor refinement** — opt-in background learning: frames where you're
+  plausibly watching your own pointer become extra training samples and the
+  model refits live. Sessions that hurt accuracy are detected and discarded.
+- **Smoothing presets** — Responsive → Very Steady, backed by a median
+  pre-filter, One Euro filter, and a fixation stabilizer that pins the dot
+  while you fixate without adding lag to real gaze shifts.
+- **Live target highlight** and an optional gaze dot, drawn on click-through
+  overlays with dirty-rect invalidation (no compositor churn).
+- **Menu-bar app** — pause/resume tracking (menu or ⌘+Right Option), turn
+  the camera and its LED off without quitting, pick a camera (persisted by
+  device ID), open the config folder.
+- **Verified clicks** — the synthesized click fires only after the target is
+  confirmed frontmost under the click point; it never lands in the wrong
+  window.
+- **Live diagnostics** — full app state written to `state.json` every 2 s.
+- **Private by construction** — no network code; frames never leave memory.
+
 ## How it works
 
-1. The webcam feed goes through Vision face-landmark detection (~30 fps).
-2. Pupil position within each eye + head pose (yaw/pitch/roll) + face position
-   become a feature vector.
-3. A ridge regression fitted during calibration maps features → screen point.
+1. The webcam feed (1080p) goes through Vision face-landmark detection
+   (~30 fps).
+2. Pupil position within each eye, head pose (yaw/pitch/roll), face position,
+   and landmark-derived head geometry become a 14-value feature vector; each
+   eye's openness is measured separately for wink detection.
+3. A degree-2 polynomial ridge regression fitted during calibration maps
+   features → screen point, one model per display.
 4. The window under your (smoothed) gaze gets a teal border highlight.
-5. Tap **Right Option**: the window is raised, the cursor warps to your gaze
-   point, and — in Ghostty only — one click is synthesized so the correct
-   *split* gets focus. Other apps get focus + cursor, never a click.
+5. Tap **Right Option** (or wink, once calibrated): the window is raised, the
+   cursor warps to your gaze point, and — in Ghostty only — one click is
+   synthesized so the correct *split* gets focus. Other apps get focus +
+   cursor, never a click.
 
 ## Build and run
 
@@ -49,6 +87,23 @@ and grant again.
 4. Look around; the teal border shows the current target. Tap Right Option to
    jump. The orange dot (toggle in menu) shows the raw gaze estimate — useful
    to judge accuracy.
+5. Optional: **Winks → Calibrate Winks…** to add wink control.
+
+## Controls
+
+| Input | Action |
+| --- | --- |
+| **Right Option** (tap) | Jump focus to the gazed window (can be disabled once winks select) |
+| **⌘ + Right Option** | Pause / resume tracking (menu-bar icon shows eye / slashed eye) |
+| **Wink** (after calibration) | Per-eye: select window, pause/resume, or nothing |
+| **Space / Esc** (during calibration) | Start the next phase / cancel |
+
+Menu bar (eye icon): live status line · Tracking Enabled · Show Gaze Dot ·
+Smoothing presets · Calibrate Screen · Add Posture Pass · Refine with Cursor ·
+Winks · Turn Camera Off · Camera picker · Open Config Folder · Quit.
+
+Saccade is a menu-bar-only app (no Dock icon). If you quit it, relaunch via
+Spotlight ("Saccade") or `open /Applications/Saccade.app`.
 
 ## Scope and behavior
 
@@ -66,9 +121,12 @@ and grant again.
   followable speed — flicks and warps are rejected) become extra training
   samples, and the model refits live every ~200 samples. Grid samples count
   double in the refit so cursor data densifies the map between dots without
-  dragging the anchors. Stop via the same menu item to get a before/after fit
-  report; refined models persist. Screens calibrated before grid samples were
-  saved must be recalibrated once before they can be refined.
+  dragging the anchors. Stop via the same menu item for a before/after report
+  scored on the calibration dots (the same yardstick for both numbers); a
+  session that makes dot accuracy worse is discarded automatically instead of
+  poisoning future refits. Refined models persist. Expect the payoff after
+  10–15 minutes of normal work, not seconds. Screens calibrated before grid
+  samples were saved must be recalibrated once before they can be refined.
 - **Add Posture Pass** (menu): the model learns your head *position* during
   calibration, so moving your chair, leaning back, or raising a standing desk
   shifts predictions. Instead of recalibrating, get into the new position and
