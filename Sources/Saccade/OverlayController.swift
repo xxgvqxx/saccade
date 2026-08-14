@@ -50,26 +50,49 @@ final class OverlayController {
         for entry in entries {
             let ownsGaze = gazePoint.map { entry.cgFrame.contains($0) } ?? false
             let origin = entry.window.frame.origin
+            var newDot: CGPoint?
+            var newHighlight: CGRect?
             if ownsGaze, let gazePoint {
                 let global = Coordinates.cgToAppKit(gazePoint)
-                entry.view.gazePoint = CGPoint(x: global.x - origin.x, y: global.y - origin.y)
-            } else {
-                entry.view.gazePoint = nil
+                newDot = CGPoint(x: global.x - origin.x, y: global.y - origin.y)
             }
             if ownsGaze, let highlight {
                 let global = Coordinates.cgToAppKit(highlight)
-                entry.view.highlightRect = global.offsetBy(dx: -origin.x, dy: -origin.y)
-            } else {
-                entry.view.highlightRect = nil
+                newHighlight = global.offsetBy(dx: -origin.x, dy: -origin.y)
             }
-            entry.view.needsDisplay = true
+            entry.view.setContent(gazePoint: newDot, highlight: newHighlight)
         }
     }
 }
 
 final class OverlayView: NSView {
-    var gazePoint: CGPoint?
-    var highlightRect: CGRect?
+    private(set) var gazePoint: CGPoint?
+    private(set) var highlightRect: CGRect?
+
+    /// Invalidates only the regions that actually changed. These windows
+    /// cover entire screens, and blanket needsDisplay at 30 fps across every
+    /// display made WindowServer re-composite ~11M transparent pixels per
+    /// frame, continuously.
+    func setContent(gazePoint newPoint: CGPoint?, highlight newRect: CGRect?) {
+        if newPoint != gazePoint {
+            if let old = gazePoint { setNeedsDisplay(Self.dotRect(at: old).insetBy(dx: -2, dy: -2)) }
+            if let new = newPoint { setNeedsDisplay(Self.dotRect(at: new).insetBy(dx: -2, dy: -2)) }
+            gazePoint = newPoint
+        }
+        if newRect != highlightRect {
+            if let old = highlightRect { setNeedsDisplay(old.insetBy(dx: -4, dy: -4)) }
+            if let new = newRect { setNeedsDisplay(new.insetBy(dx: -4, dy: -4)) }
+            highlightRect = newRect
+        }
+    }
+
+    private static func dotRect(at point: CGPoint) -> CGRect {
+        let radius: CGFloat = 7
+        return CGRect(
+            x: point.x - radius, y: point.y - radius,
+            width: radius * 2, height: radius * 2
+        )
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         if let rect = highlightRect {
@@ -82,13 +105,8 @@ final class OverlayView: NSView {
             path.stroke()
         }
         if let point = gazePoint {
-            let radius: CGFloat = 7
-            let dotRect = CGRect(
-                x: point.x - radius, y: point.y - radius,
-                width: radius * 2, height: radius * 2
-            )
             NSColor.systemOrange.withAlphaComponent(0.55).setFill()
-            NSBezierPath(ovalIn: dotRect).fill()
+            NSBezierPath(ovalIn: Self.dotRect(at: point)).fill()
         }
     }
 }
