@@ -24,8 +24,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var cameraPowerMenuItem: NSMenuItem!
     private var cameraSubmenu: NSMenu!
     private var calibrateSubmenu: NSMenu!
+    private var postureSubmenu: NSMenu!
     private var smoothingSubmenu: NSMenu!
     private var calibratingScreenName: String?
+    private var calibrationIsPosturePass = false
     private var recentJumps: [String] = []
     /// Anchor for the fixation stabilizer (global CG coords).
     private var fixationAnchor: CGPoint?
@@ -121,6 +123,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.overlay.show()
             let name = self.calibratingScreenName
             self.calibratingScreenName = nil
+            let posturePass = self.calibrationIsPosturePass
+            self.calibrationIsPosturePass = false
+            if posturePass {
+                self.completePosturePass(name: name, samples: samples)
+                return
+            }
             if let newModel, let name {
                 // A fresh grid supersedes any cursor samples collected against
                 // the old geometry.
@@ -147,6 +155,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 )
             }
         }
+    }
+
+    /// Appends a posture pass's samples to the screen's saved grid and refits
+    /// one model across every posture collected so far.
+    private func completePosturePass(name: String?, samples: [(raw: [Double], target: CGPoint)]) {
+        guard let name, !samples.isEmpty, var calibrated = store.screens[name] else {
+            showAlert(title: "Posture pass cancelled", text: "Existing calibrations are unchanged.")
+            return
+        }
+        calibrated.gridSamples = (calibrated.gridSamples ?? []) + ModelStore.samples(fromTuples: samples)
+        store.screens[name] = calibrated
+        refitScreen(name, inBackground: false)
+        store.save()
+        clearGaze()
+        let rms = store.screens[name]?.model.rmsErrorPixels ?? 0
+        showAlert(
+            title: "Posture pass added — \(name)",
+            text: String(
+                format: "Fit error ≈ %.0f px RMS across ALL postures (expect this to read a bit higher than a single-posture score).\nAdd a pass whenever you sit or stand differently — your head position tells the model which posture a frame belongs to. A full recalibration starts over and discards passes.",
+                rms
+            )
+        )
     }
 
     private func setupHousekeeping() {
@@ -491,6 +521,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         calibrateItem.submenu = calibrateSubmenu
         menu.addItem(calibrateItem)
 
+        let postureItem = NSMenuItem(title: "Add Posture Pass", action: nil, keyEquivalent: "")
+        postureSubmenu = NSMenu()
+        postureSubmenu.delegate = self
+        postureItem.submenu = postureSubmenu
+        menu.addItem(postureItem)
+
         refineMenuItem = menuItem("Refine with Cursor", action: #selector(toggleRefinement))
         menu.addItem(refineMenuItem)
 
@@ -523,6 +559,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if menu == calibrateSubmenu {
             rebuildCalibrateSubmenu()
+            return
+        }
+        if menu == postureSubmenu {
+            rebuildPostureSubmenu()
             return
         }
         if menu == smoothingSubmenu {
@@ -617,6 +657,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// Only screens with saved grid samples can absorb a posture pass — the
+    /// pass refits from the combined sample pool, so there must be one.
+    private func rebuildPostureSubmenu() {
+        postureSubmenu.removeAllItems()
+        for screen in NSScreen.screens {
+            guard let calibrated = store.screens[screen.localizedName],
+                  !(calibrated.gridSamples ?? []).isEmpty
+            else { continue }
+            let item = NSMenuItem(
+                title: screen.localizedName,
+                action: #selector(selectPostureScreen(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = screen
+            postureSubmenu.addItem(item)
+        }
+        if postureSubmenu.items.isEmpty {
+            let item = NSMenuItem(title: "Grid-calibrate a screen first", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            postureSubmenu.addItem(item)
+        }
+    }
+
     // MARK: - Actions
 
     private func setTracking(_ enabled: Bool) {
@@ -667,6 +731,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         calibratingScreenName = screen.localizedName
         overlay.hide()
         calibration.begin(on: screen)
+    }
+
+    @objc private func selectPostureScreen(_ sender: NSMenuItem) {
+        guard let screen = sender.representedObject as? NSScreen,
+              !calibration.isActive
+        else { return }
+        endPursuit(showReport: false)
+        clearGaze()
+        calibratingScreenName = screen.localizedName
+        calibrationIsPosturePass = true
+        overlay.hide()
+        calibration.begin(on: screen, mode: .posturePass)
     }
 
     @objc private func selectSmoothing(_ sender: NSMenuItem) {

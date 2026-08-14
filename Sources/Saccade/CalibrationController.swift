@@ -7,6 +7,15 @@ import AppKit
 /// turned head with counter-rotated eyes doesn't read as a gaze shift.
 /// Space starts each phase; Esc cancels.
 final class CalibrationController {
+    enum Mode {
+        case full
+        /// One quick eyes-only grid captured from a NEW sitting/standing
+        /// position. Its samples are appended to the screen's existing grid
+        /// so a single model spans every posture the user has taught it —
+        /// head-position features tell the fit which posture a frame is from.
+        case posturePass
+    }
+
     private enum State {
         case idle
         case interstitial
@@ -44,7 +53,7 @@ final class CalibrationController {
         self.config = config
     }
 
-    func begin(on screen: NSScreen) {
+    func begin(on screen: NSScreen, mode: Mode = .full) {
         guard window == nil else { return }
         self.screen = screen
         samples = []
@@ -52,24 +61,36 @@ final class CalibrationController {
         // Portrait screens get the grid transposed so the dense axis follows
         // the screen's long dimension.
         let portrait = screen.frame.height > screen.frame.width
-        let eyeCols = max(2, config.calibrationColumns)
-        let eyeRows = max(2, config.calibrationRows)
-        let headCols = max(2, config.headPassColumns ?? 3)
-        let headRows = max(2, config.headPassRows ?? 3)
-        phases = [
-            PhaseSpec(
-                cols: portrait ? eyeRows : eyeCols,
-                rows: portrait ? eyeCols : eyeRows,
-                title: "Phase 1 of 2 — Eyes",
-                instruction: "Keep your head still. Follow the dot with your EYES only."
-            ),
-            PhaseSpec(
-                cols: portrait ? headRows : headCols,
-                rows: portrait ? headCols : headRows,
-                title: "Phase 2 of 2 — Head",
-                instruction: "TURN YOUR HEAD to point your nose at each dot. Let your eyes follow naturally."
-            ),
-        ]
+        switch mode {
+        case .full:
+            let eyeCols = max(2, config.calibrationColumns)
+            let eyeRows = max(2, config.calibrationRows)
+            let headCols = max(2, config.headPassColumns ?? 3)
+            let headRows = max(2, config.headPassRows ?? 3)
+            phases = [
+                PhaseSpec(
+                    cols: portrait ? eyeRows : eyeCols,
+                    rows: portrait ? eyeCols : eyeRows,
+                    title: "Phase 1 of 2 — Eyes",
+                    instruction: "Keep your head still. Follow the dot with your EYES only."
+                ),
+                PhaseSpec(
+                    cols: portrait ? headRows : headCols,
+                    rows: portrait ? headCols : headRows,
+                    title: "Phase 2 of 2 — Head",
+                    instruction: "TURN YOUR HEAD to point your nose at each dot. Let your eyes follow naturally."
+                ),
+            ]
+        case .posturePass:
+            phases = [
+                PhaseSpec(
+                    cols: portrait ? 3 : 4,
+                    rows: portrait ? 4 : 3,
+                    title: "Posture Pass",
+                    instruction: "Stay in your NEW position — don't recreate the old one. Follow the dot with your EYES."
+                ),
+            ]
+        }
 
         let calibrationWindow = KeyableWindow(
             contentRect: screen.frame,

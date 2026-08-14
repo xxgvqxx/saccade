@@ -69,9 +69,19 @@ and grant again.
   dragging the anchors. Stop via the same menu item to get a before/after fit
   report; refined models persist. Screens calibrated before grid samples were
   saved must be recalibrated once before they can be refined.
+- **Add Posture Pass** (menu): the model learns your head *position* during
+  calibration, so moving your chair, leaning back, or raising a standing desk
+  shifts predictions. Instead of recalibrating, get into the new position and
+  run a quick 12-dot eyes-only pass — its samples join the originals and one
+  model is refitted across all postures, interpolating between them via the
+  head-position features. Add a pass per posture you actually use (your face
+  must still be well in the camera frame). The reported fit error then spans
+  every posture, so it reads a little higher than a single-posture score. A
+  full recalibration starts over and discards passes.
 - Calibrations persist in `~/Library/Application Support/Saccade/calibrations.json`
-  and reload on launch. Recalibrate a screen whenever you change chair height,
-  camera position, or lighting significantly.
+  and reload on launch. Recalibrate a screen fully whenever you move the
+  camera or lighting changes significantly — posture passes cover *you*
+  moving, not the camera.
 - **Smoothing** (menu): presets from Responsive to Very Steady. Under the
   hood: median-of-5 pre-filter → One Euro filter (normalized coordinates) →
   a fixation stabilizer that pins the dot while predictions stay within a
