@@ -3,7 +3,9 @@ import Vision
 import CoreVideo
 
 /// Extracts a raw gaze feature vector from one camera frame using Vision
-/// face landmarks. Returns nil when there is no face or the eyes are closed.
+/// face landmarks. Returns nil when there is no face; when the face is there
+/// but an eye is closed, per-eye openness is still reported (the wink signal)
+/// and only the gaze features are withheld.
 ///
 /// Feature layout (14 values):
 ///   0 left pupil x within left-eye bbox   (0..1)
@@ -27,7 +29,17 @@ import CoreVideo
 final class GazeEstimator {
     static let rawFeatureCount = 14
 
-    func features(from pixelBuffer: CVPixelBuffer) -> [Double]? {
+    /// One analyzed frame. Openness values are the eye-region height/width
+    /// ratio in Vision's own left/right labeling — the wink calibrator learns
+    /// which region is the user's left eye, so mirroring never matters here.
+    struct FrameResult {
+        /// nil while an eye is closed — pupil landmarks are garbage then.
+        let gazeFeatures: [Double]?
+        let visionLeftOpenness: Double
+        let visionRightOpenness: Double
+    }
+
+    func analyze(_ pixelBuffer: CVPixelBuffer) -> FrameResult? {
         let request = VNDetectFaceLandmarksRequest()
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
         do {
@@ -50,10 +62,17 @@ final class GazeEstimator {
         let rightBox = Self.boundingBox(of: rightEye)
         guard leftBox.width > 0.001, rightBox.width > 0.001 else { return nil }
 
-        // Blink / closed-eye rejection: a closed eye collapses vertically.
+        // A closed eye collapses vertically. Openness always ships (it IS the
+        // wink signal); gaze features only when both eyes are usable.
         let leftOpenness = leftBox.height / leftBox.width
         let rightOpenness = rightBox.height / rightBox.width
-        guard leftOpenness > 0.12, rightOpenness > 0.12 else { return nil }
+        guard leftOpenness > 0.12, rightOpenness > 0.12 else {
+            return FrameResult(
+                gazeFeatures: nil,
+                visionLeftOpenness: leftOpenness,
+                visionRightOpenness: rightOpenness
+            )
+        }
 
         let lpx = (Double(leftPupil.x) - leftBox.minX) / leftBox.width
         let lpy = (Double(leftPupil.y) - leftBox.minY) / leftBox.height
@@ -71,7 +90,13 @@ final class GazeEstimator {
         let interEyeDX = (rightBox.minX + rightBox.width / 2) - (leftBox.minX + leftBox.width / 2)
         let interEyeDY = (rightBox.minY + rightBox.height / 2) - (leftBox.minY + leftBox.height / 2)
         let interEye = (interEyeDX * interEyeDX + interEyeDY * interEyeDY).squareRoot()
-        guard interEye > 0.01 else { return nil }
+        guard interEye > 0.01 else {
+            return FrameResult(
+                gazeFeatures: nil,
+                visionLeftOpenness: leftOpenness,
+                visionRightOpenness: rightOpenness
+            )
+        }
 
         var noseX = 0.0, noseY = 0.0
         for point in nose.normalizedPoints {
@@ -83,12 +108,16 @@ final class GazeEstimator {
         let noseDX = (noseX - eyeMidX) / interEye
         let noseDY = (noseY - eyeMidY) / interEye
 
-        return [
-            lpx, lpy, rpx, rpy,
-            yaw, pitch, roll,
-            Double(box.midX), Double(box.midY), Double(box.width),
-            noseDX, noseDY, interEye, eyeMidY,
-        ]
+        return FrameResult(
+            gazeFeatures: [
+                lpx, lpy, rpx, rpy,
+                yaw, pitch, roll,
+                Double(box.midX), Double(box.midY), Double(box.width),
+                noseDX, noseDY, interEye, eyeMidY,
+            ],
+            visionLeftOpenness: leftOpenness,
+            visionRightOpenness: rightOpenness
+        )
     }
 
     private struct Box {

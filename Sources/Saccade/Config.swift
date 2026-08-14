@@ -39,6 +39,15 @@ struct Config: Codable {
     var headPassRows: Int? = nil
     var samplesPerPoint: Int = 25
     var smoothing: SmoothingConfig = SmoothingConfig()
+    // Wink control. All optional so configs written before the feature
+    // existed still decode. winksEnabled defaults to false until calibrated.
+    var winksEnabled: Bool? = nil
+    var winkCalibration: WinkCalibrationData? = nil
+    var winkLeftAction: WinkAction? = nil
+    var winkRightAction: WinkAction? = nil
+    /// Nil = true. Off lets a wink fully replace the Right Option key as the
+    /// select trigger (⌘+Right Option pause toggle keeps working regardless).
+    var optionKeySelects: Bool? = nil
 
     static var directory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]

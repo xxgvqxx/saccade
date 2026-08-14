@@ -10,7 +10,7 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     private let estimator = GazeEstimator()
     private var currentInput: AVCaptureDeviceInput?
 
-    var onFeatures: (([Double]) -> Void)?
+    var onFrame: ((GazeEstimator.FrameResult) -> Void)?
     var onNoFace: (() -> Void)?
     private(set) var currentDeviceName: String?
 
@@ -136,8 +136,8 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         // never drain its autorelease pool — Vision's per-frame objects would
         // accumulate for hours (multi-GB). Drain explicitly every frame.
         autoreleasepool {
-            if let raw = estimator.features(from: pixelBuffer) {
-                onFeatures?(raw)
+            if let result = estimator.analyze(pixelBuffer) {
+                onFrame?(result)
             } else {
                 onNoFace?()
             }

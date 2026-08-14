@@ -10,6 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let overlay = OverlayController()
     private let hotkey = HotkeyTap()
     private let pursuit = PursuitCalibrator()
+    private let winkDetector = WinkDetector()
+    private let winkCalibrator = WinkCalibrationController()
     private var focus: FocusController!
     private var calibration: CalibrationController!
 
@@ -26,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var calibrateSubmenu: NSMenu!
     private var postureSubmenu: NSMenu!
     private var smoothingSubmenu: NSMenu!
+    private var winksSubmenu: NSMenu!
     private var calibratingScreenName: String?
     private var calibrationIsPosturePass = false
     private var recentJumps: [String] = []
@@ -57,6 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Recent normalized predictions; a median over these rejects single-frame
     /// landmark spikes before smoothing.
     private var recentNormalized: [(x: Double, y: Double)] = []
+    /// Last ~1.5 s of gaze output. A wink-select uses the entry from just
+    /// before the eyelid started moving — the live prediction is corrupted by
+    /// then. Time-pruned AND hard-capped, so it cannot grow.
+    private var gazeHistory: [(time: Double, gaze: CGPoint, target: TargetWindow?)] = []
     /// Which calibrated screen currently owns the gaze, with hysteresis.
     private var currentScreenKey: String?
     private var pendingScreenKey: String?
@@ -75,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         checkAccessibility()
         setupOverlay()
         setupCalibrationCompletion()
+        setupWinks()
         setupCamera()
         setupHotkey()
         setupHousekeeping()
@@ -98,8 +106,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func setupCamera() {
-        camera.onFeatures = { [weak self] raw in
-            DispatchQueue.main.async { self?.handleFeatures(raw) }
+        camera.onFrame = { [weak self] result in
+            DispatchQueue.main.async { self?.handleFrame(result) }
         }
         camera.onNoFace = { [weak self] in
             DispatchQueue.main.async { self?.handleNoFace() }
@@ -112,12 +120,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func setupHotkey() {
-        hotkey.onTrigger = { [weak self] in self?.jump() }
+        hotkey.onTrigger = { [weak self] in
+            guard let self, self.config.optionKeySelects ?? true else { return }
+            self.jump()
+        }
         hotkey.onToggle = { [weak self] in
             guard let self else { return }
             self.setTracking(!self.trackingEnabled)
         }
         hotkeyOK = hotkey.start()
+    }
+
+    private func setupWinks() {
+        winkDetector.calibration = config.winkCalibration
+        winkDetector.enabled = (config.winksEnabled ?? false) && config.winkCalibration != nil
+        winkDetector.onWink = { [weak self] eye, onset in
+            self?.handleWink(eye: eye, onset: onset)
+        }
+        winkCalibrator.onComplete = { [weak self] data, failure in
+            self?.completeWinkCalibration(data, failure: failure)
+        }
     }
 
     private func setupCalibrationCompletion() {
@@ -214,6 +236,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             "targetWindow": currentTarget.map { "\($0.ownerName) #\($0.windowID)" } ?? "none",
             "calibratedScreens": store.screens.keys.sorted(),
             "refining": pursuit.isActive,
+            "winks": config.winkCalibration == nil
+                ? "not calibrated"
+                : (config.winksEnabled ?? false)
+                    ? "on — left: \((config.winkLeftAction ?? .none).rawValue), right: \((config.winkRightAction ?? .none).rawValue), optionKey: \(config.optionKeySelects ?? true)"
+                    : "off",
             "smoothing": String(format: "minCutoff %.2f / beta %.3f / fixation %.0fpx",
                                 config.smoothing.minCutoff, config.smoothing.beta,
                                 config.smoothing.fixationRadius ?? 30),
@@ -226,12 +253,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Gaze pipeline (main thread)
 
-    private func handleFeatures(_ raw: [Double]) {
+    private func handleFrame(_ result: GazeEstimator.FrameResult) {
+        // The face is present even when an eye is closed — a held wink must
+        // not trip the lost-face timeout and clear the gaze it will select.
         lastFaceTime = CACurrentMediaTime()
-        if calibration.isActive {
-            calibration.ingest(raw: raw)
+
+        if winkCalibrator.isActive {
+            winkCalibrator.ingest(
+                visionLeft: result.visionLeftOpenness,
+                visionRight: result.visionRightOpenness
+            )
             return
         }
+        if calibration.isActive {
+            if let raw = result.gazeFeatures {
+                calibration.ingest(raw: raw)
+            } else {
+                calibration.ingestNoFace()
+            }
+            return
+        }
+
+        winkDetector.ingest(
+            visionLeft: result.visionLeftOpenness,
+            visionRight: result.visionRightOpenness,
+            time: lastFaceTime
+        )
+        // While an eye is closed (or mid-wink), the pupil landmarks are
+        // corrupted — hold the last gaze output instead of chasing them.
+        guard let raw = result.gazeFeatures, !winkDetector.isEpisodeActive else { return }
+        handleFeatures(raw)
+    }
+
+    private func handleFeatures(_ raw: [Double]) {
         if pursuit.isActive, let cursor = pursuit.sampleCursor(now: lastFaceTime) {
             ingestPursuitSample(raw: raw, cursorCG: cursor)
         }
@@ -299,6 +353,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let stabilized = stabilize(clamped)
         gazePoint = stabilized
         updateTarget(for: stabilized)
+        gazeHistory.append((time: t, gaze: stabilized, target: currentTarget))
+        while let first = gazeHistory.first, first.time < t - 1.5 {
+            gazeHistory.removeFirst()
+        }
+        if gazeHistory.count > 90 {
+            gazeHistory.removeFirst(gazeHistory.count - 90)
+        }
         overlay.update(
             gazePoint: config.showGazeDot ? stabilized : nil,
             highlight: currentTarget?.bounds
@@ -349,6 +410,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if calibration.isActive {
             calibration.ingestNoFace()
         }
+        if winkCalibrator.isActive {
+            winkCalibrator.ingestNoFace()
+        }
+        winkDetector.ingestNoFace()
     }
 
     private func clearGaze() {
@@ -357,6 +422,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pendingTarget = nil
         pendingCount = 0
         recentNormalized.removeAll()
+        gazeHistory.removeAll(keepingCapacity: true)
         currentScreenKey = nil
         pendingScreenKey = nil
         pendingScreenCount = 0
@@ -391,7 +457,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Jump
 
     private func jump() {
-        guard !calibration.isActive else { return }
+        guard !calibration.isActive, !winkCalibrator.isActive else { return }
         guard trackingEnabled, let target = currentTarget, let gaze = gazePoint else {
             NSSound.beep()
             recordJump("beep — no \(gazePoint == nil ? "gaze" : "target window") at press")
@@ -411,6 +477,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if recentJumps.count > 6 {
             recentJumps.removeFirst(recentJumps.count - 6)
         }
+    }
+
+    // MARK: - Winks
+
+    private func handleWink(eye: WinkDetector.Eye, onset: Double) {
+        guard !calibration.isActive, !winkCalibrator.isActive else { return }
+        let action = (eye == .left ? config.winkLeftAction : config.winkRightAction) ?? .none
+        switch action {
+        case .none:
+            break
+        case .pauseTracking:
+            setTracking(!trackingEnabled)
+            recordJump("\(eye.rawValue) wink — tracking \(trackingEnabled ? "resumed" : "paused")")
+        case .select:
+            winkSelect(eye: eye, onset: onset)
+        }
+    }
+
+    private func winkSelect(eye: WinkDetector.Eye, onset: Double) {
+        guard trackingEnabled else { return }
+        // The eyelid starts distorting the landmarks BEFORE the detector can
+        // confirm anything — select with the gaze from just before onset.
+        let entry = gazeHistory.last(where: { $0.time <= onset - 0.12 }) ?? gazeHistory.last
+        guard let entry, let target = entry.target else {
+            NSSound.beep()
+            recordJump("beep — \(eye.rawValue) wink with no target window")
+            return
+        }
+        recordJump("\(eye.rawValue) wink select")
+        focus.jump(to: target, gaze: entry.gaze)
+    }
+
+    private func completeWinkCalibration(_ data: WinkCalibrationData?, failure: String?) {
+        overlay.show()
+        winkDetector.reset()
+        guard let data else {
+            if let failure {
+                showAlert(title: "Wink calibration failed", text: failure + "\nAny previous wink calibration is unchanged.")
+            }
+            return
+        }
+        config.winkCalibration = data
+        if config.winkLeftAction == nil { config.winkLeftAction = .pauseTracking }
+        if config.winkRightAction == nil { config.winkRightAction = .select }
+        config.winksEnabled = true
+        config.save()
+        winkDetector.calibration = data
+        winkDetector.enabled = true
+        let leftAction = config.winkLeftAction ?? .none
+        let rightAction = config.winkRightAction ?? .none
+        showAlert(
+            title: "Winks calibrated",
+            text: "Left wink: \(leftAction.title). Right wink: \(rightAction.title). Change either in the Winks menu.\nA wink is one eye held closed for a beat while the other stays open — blinks are ignored."
+        )
     }
 
     // MARK: - Cursor refinement
@@ -567,6 +687,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refineMenuItem = menuItem("Refine with Cursor", action: #selector(toggleRefinement))
         menu.addItem(refineMenuItem)
 
+        let winksItem = NSMenuItem(title: "Winks", action: nil, keyEquivalent: "")
+        winksSubmenu = NSMenu()
+        winksSubmenu.delegate = self
+        winksItem.submenu = winksSubmenu
+        menu.addItem(winksItem)
+
         cameraPowerMenuItem = menuItem("Turn Camera Off", action: #selector(toggleCameraPower))
         menu.addItem(cameraPowerMenuItem)
 
@@ -606,6 +732,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             rebuildSmoothingSubmenu()
             return
         }
+        if menu == winksSubmenu {
+            rebuildWinksSubmenu()
+            return
+        }
         let pursuitTotal = pursuitCollected.values.reduce(0, +)
         refineMenuItem.title = pursuit.isActive
             ? "Stop Cursor Refinement (\(pursuitTotal) samples)"
@@ -618,6 +748,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         parts.append(trackingEnabled ? "Tracking" : "PAUSED (⌘+Right⌥ resumes)")
         if pursuit.isActive {
             parts.append("Refining — \(pursuitTotal) cursor samples")
+        }
+        if config.winkCalibration != nil, config.winksEnabled ?? false {
+            parts.append("Winks: on")
         }
         parts.append(camera.isRunning ? "Camera: \(cameraStatus)" : "Camera: OFF")
         let faceRecent = CACurrentMediaTime() - lastFaceTime < 0.6
@@ -718,6 +851,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private static let winkActions: [WinkAction] = [.none, .select, .pauseTracking]
+
+    private func rebuildWinksSubmenu() {
+        winksSubmenu.removeAllItems()
+        let calibrated = config.winkCalibration != nil
+
+        if calibrated {
+            let enabledItem = menuItem("Winks Enabled", action: #selector(toggleWinks))
+            enabledItem.state = (config.winksEnabled ?? false) ? .on : .off
+            winksSubmenu.addItem(enabledItem)
+        } else {
+            let info = NSMenuItem(title: "Not calibrated yet", action: nil, keyEquivalent: "")
+            info.isEnabled = false
+            winksSubmenu.addItem(info)
+        }
+        winksSubmenu.addItem(menuItem(
+            calibrated ? "Recalibrate Winks…" : "Calibrate Winks…",
+            action: #selector(startWinkCalibration)
+        ))
+
+        if calibrated {
+            winksSubmenu.addItem(.separator())
+            winksSubmenu.addItem(winkActionItem(
+                title: "Left Wink", current: config.winkLeftAction ?? .none,
+                action: #selector(selectLeftWinkAction(_:))
+            ))
+            winksSubmenu.addItem(winkActionItem(
+                title: "Right Wink", current: config.winkRightAction ?? .none,
+                action: #selector(selectRightWinkAction(_:))
+            ))
+            winksSubmenu.addItem(.separator())
+            let keyItem = menuItem("Right Option Key Selects", action: #selector(toggleOptionKeySelects))
+            keyItem.state = (config.optionKeySelects ?? true) ? .on : .off
+            winksSubmenu.addItem(keyItem)
+        }
+    }
+
+    private func winkActionItem(title: String, current: WinkAction, action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: "\(title): \(current.title)", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        for (index, candidate) in Self.winkActions.enumerated() {
+            let choice = NSMenuItem(title: candidate.title, action: action, keyEquivalent: "")
+            choice.target = self
+            choice.tag = index
+            choice.state = candidate == current ? .on : .off
+            submenu.addItem(choice)
+        }
+        item.submenu = submenu
+        return item
+    }
+
     // MARK: - Actions
 
     private func setTracking(_ enabled: Bool) {
@@ -760,7 +944,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func selectCalibrationScreen(_ sender: NSMenuItem) {
         guard let screen = sender.representedObject as? NSScreen,
-              !calibration.isActive
+              !calibration.isActive, !winkCalibrator.isActive
         else { return }
         endPursuit(showReport: false)
         checkAccessibility()
@@ -772,7 +956,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func selectPostureScreen(_ sender: NSMenuItem) {
         guard let screen = sender.representedObject as? NSScreen,
-              !calibration.isActive
+              !calibration.isActive, !winkCalibrator.isActive
         else { return }
         endPursuit(showReport: false)
         clearGaze()
@@ -780,6 +964,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         calibrationIsPosturePass = true
         overlay.hide()
         calibration.begin(on: screen, mode: .posturePass)
+    }
+
+    @objc private func startWinkCalibration() {
+        guard !calibration.isActive, !winkCalibrator.isActive,
+              let screen = NSScreen.main ?? NSScreen.screens.first
+        else { return }
+        endPursuit(showReport: false)
+        clearGaze()
+        overlay.hide()
+        winkCalibrator.begin(on: screen)
+    }
+
+    @objc private func toggleWinks() {
+        let enabled = !(config.winksEnabled ?? false)
+        config.winksEnabled = enabled
+        config.save()
+        winkDetector.enabled = enabled && config.winkCalibration != nil
+        winkDetector.reset()
+    }
+
+    @objc private func selectLeftWinkAction(_ sender: NSMenuItem) {
+        config.winkLeftAction = Self.winkActions[sender.tag]
+        config.save()
+    }
+
+    @objc private func selectRightWinkAction(_ sender: NSMenuItem) {
+        config.winkRightAction = Self.winkActions[sender.tag]
+        config.save()
+    }
+
+    @objc private func toggleOptionKeySelects() {
+        config.optionKeySelects = !(config.optionKeySelects ?? true)
+        config.save()
     }
 
     @objc private func selectSmoothing(_ sender: NSMenuItem) {

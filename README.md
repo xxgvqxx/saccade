@@ -82,6 +82,18 @@ and grant again.
   and reload on launch. Recalibrate a screen fully whenever you move the
   camera or lighting changes significantly — posture passes cover *you*
   moving, not the camera.
+- **Winks** (menu): wink an eye to trigger an action — either eye can select
+  the gazed window (so a wink can fully replace the Right Option key; there's
+  a toggle to turn the key off) or pause/resume tracking. Off until you run
+  the guided **Calibrate Winks** flow, which learns your open/closed eye
+  shape, watches real blinks, then watches three winks per eye — from that it
+  knows which landmark region is *your* left eye (immune to camera mirroring)
+  and how much your other eye droops when you wink. Detection then requires
+  one eye held closed ~0.2 s while the other stays clearly open the whole
+  time, so blinks — both eyes dropping together, and over faster than the
+  hold — can't fire it. If your winks are too blink-like, calibration says so
+  instead of saving garbage. Selection uses your gaze from just before the
+  eyelid started moving, because a closing lid corrupts the landmarks.
 - **Smoothing** (menu): presets from Responsive to Very Steady. Under the
   hood: median-of-5 pre-filter → One Euro filter (normalized coordinates) →
   a fixation stabilizer that pins the dot while predictions stay within a
@@ -112,6 +124,9 @@ and grant again.
   lower it for less jitter.
 - `targetSwitchFrames` — frames a new window must be gazed at before the
   highlight switches (default 3).
+- `winksEnabled` / `winkLeftAction` / `winkRightAction` / `optionKeySelects` /
+  `winkCalibration` — wink control state; manage these from the Winks menu
+  rather than by hand.
 
 ## Known limits (v1)
 
