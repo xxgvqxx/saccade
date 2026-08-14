@@ -34,7 +34,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // Cursor-refinement session state (main thread only).
     private static let pursuitSampleCap = 2400
-    private var pursuitBaselineRMS: [String: Double] = [:]
+    /// Models as they were when refinement started, so the end-of-session
+    /// report can score old vs new on the SAME yardstick (the grid dots) —
+    /// training RMS is incomparable across different training sets.
+    private var pursuitBaselineModels: [String: GazeModel] = [:]
     private var pursuitCollected: [String: Int] = [:]
     private var pursuitSkipped: Set<String> = []
     private var pursuitPendingRefit: [String: Int] = [:]
@@ -322,6 +325,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return point
     }
 
+    /// RMS pixel error of a model over a fixed sample set — the comparable
+    /// metric that training RMS (whose denominator set changes) is not.
+    private static func rmsPixels(of model: GazeModel, over samples: [(raw: [Double], target: CGPoint)]) -> Double {
+        guard !samples.isEmpty else { return 0 }
+        var sum = 0.0
+        for s in samples {
+            let p = model.predict(s.raw)
+            let dx = Double(p.x - s.target.x)
+            let dy = Double(p.y - s.target.y)
+            sum += dx * dx + dy * dy
+        }
+        return (sum / Double(samples.count)).squareRoot()
+    }
+
     private static func median(_ values: [Double]) -> Double {
         guard !values.isEmpty else { return 0 }
         let sorted = values.sorted()
@@ -464,11 +481,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var lines: [String] = []
         for (key, count) in pursuitCollected.sorted(by: { $0.key < $1.key }) where count > 0 {
             refitScreen(key, inBackground: false)
-            if let old = pursuitBaselineRMS[key],
-               let new = store.screens[key]?.model.rmsErrorPixels {
+            guard let calibrated = store.screens[key],
+                  let grid = calibrated.gridSamples, !grid.isEmpty,
+                  let baseline = pursuitBaselineModels[key]
+            else { continue }
+            let anchors = ModelStore.tuples(grid)
+            let oldEval = Self.rmsPixels(of: baseline, over: anchors)
+            let newEval = Self.rmsPixels(of: calibrated.model, over: anchors)
+            if newEval > oldEval * 1.15 {
+                // Cursor data actively hurt anchor accuracy — bad labels
+                // (eyes weren't on the pointer). Keeping them would poison
+                // every future refit too, so drop this session's samples.
+                store.screens[key]?.model = baseline
+                var pursuitList = calibrated.pursuitSamples ?? []
+                pursuitList.removeLast(min(count, pursuitList.count))
+                store.screens[key]?.pursuitSamples = pursuitList
                 lines.append(String(
-                    format: "%@: %.0f → %.0f px fit error (%d cursor samples)",
-                    key, old, new, count
+                    format: "%@: the %d cursor samples made dot accuracy worse (%.0f → %.0f px) and were discarded. Were your eyes on the pointer while it moved?",
+                    key, count, oldEval, newEval
+                ))
+            } else {
+                lines.append(String(
+                    format: "%@: %.0f → %.0f px on the calibration dots, plus %d cursor samples covering the space between them",
+                    key, oldEval, newEval, count
                 ))
             }
         }
@@ -476,6 +511,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard showReport else { return }
         if lines.isEmpty {
             lines.append("No samples collected — the pointer has to move (slower than a flick) over a calibrated screen while your eyes follow it.")
+        } else if pursuitCollected.values.reduce(0, +) < 300 {
+            lines.append("Tip: that's under a minute of usable pursuit. The effect gets real after 10–15 minutes of normal work with refinement on.")
         }
         for key in pursuitSkipped.sorted() {
             lines.append("\(key): skipped — its calibration predates saved grid samples. Recalibrate it once to make it refinable.")
@@ -710,7 +747,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             )
             return
         }
-        pursuitBaselineRMS = store.screens.mapValues { $0.model.rmsErrorPixels }
+        pursuitBaselineModels = store.screens.mapValues { $0.model }
         pursuitCollected = [:]
         pursuitSkipped = []
         pursuitPendingRefit = [:]
